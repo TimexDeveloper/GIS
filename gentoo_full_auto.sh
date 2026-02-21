@@ -1,18 +1,26 @@
 #!/bin/bash
+# Настройка переменных — ПРОВЕРЬ ИХ!
+DISK="/dev/sda"
+PART_SWAP="${DISK}1"
+PART_ROOT="${DISK}2"
+
 set -e
 
-echo "--- 1. Подготовка дисков (/dev/sda1-swap, /dev/sda2-root) ---"
-mkswap /dev/sda1
-swapon /dev/sda1
-mkfs.ext4 -F /dev/sda2
-mount /dev/sda2 /mnt/gentoo
-cd /mnt/gentoo
+echo "--- 1. Подготовка дисков ---"
+swapoff -a || true
+mkswap -f "$PART_SWAP"
+swapon "$PART_SWAP"
+mkfs.ext4 -F "$PART_ROOT"
+mount "$PART_ROOT" /mnt/gentoo
 
-echo "--- 2. Загрузка и распаковка Stage3 ---"
+echo "--- 2. Загрузка Stage3 ---"
+cd /mnt/gentoo
+# Прямая ссылка на актуальный билд
 wget https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-desktop-openrc/stage3-amd64-desktop-openrc-20260215T164556Z.tar.xz
 tar xpvf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner
+rm stage3-*.tar.xz
 
-echo "--- 3. Настройка окружения ---"
+echo "--- 3. Монтирование окружения ---"
 cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
 mount --types proc /proc /mnt/gentoo/proc
 mount --rbind /sys /mnt/gentoo/sys
@@ -22,36 +30,49 @@ mount --make-rslave /mnt/gentoo/dev
 mount --bind /run /mnt/gentoo/run
 mount --make-slave /mnt/gentoo/run
 
-echo "--- 4. Работа внутри CHROOT ---"
-cat <<'EOF' > /mnt/gentoo/final_step.sh
+echo "--- 4. Вход в CHROOT и настройка ---"
+cat <<EOF > /mnt/gentoo/install.sh
 #!/bin/bash
 source /etc/profile
-export PS1="(chroot) $PS1"
 
-# Синхронизация (быстрый вариант)
+# Быстрая синхронизация
 emerge-webrsync
 
-# Настройка fstab (чтобы система знала, где корень и своп)
-cat <<FSTAB > /etc/fstab
-/dev/sda1  none  swap  sw  0 0
-/dev/sda2  /     ext4  noatime  0 1
-FSTAB
+# Настройка fstab через UUID (это надежнее)
+ROOT_UUID=\$(blkid -s UUID -o value $PART_ROOT)
+SWAP_UUID=\$(blkid -s UUID -o value $PART_SWAP)
+echo "UUID=\$ROOT_UUID / ext4 noatime 0 1" > /etc/fstab
+echo "UUID=\$SWAP_UUID none swap sw 0 0" >> /etc/fstab
 
-# Установка бинарного ядра и загрузчика
-# Это сэкономит тебе ДЕНЬ компиляции
-echo "sys-kernel/gentoo-kernel-bin" >> /etc/portage/package.accept_keywords
+# Настройка make.conf (минимализм для старого ноута)
+cat <<CONF > /etc/portage/make.conf
+COMMON_FLAGS="-O2 -march=native -pipe"
+CFLAGS="\${COMMON_FLAGS}"
+CXXFLAGS="\${COMMON_FLAGS}"
+MAKEOPTS="-j2"
+ACCEPT_LICENSE="*"
+USE="X elogind -systemd -gnome -kde"
+VIDEO_CARDS="intel"
+CONF
+
+# Установка ядра (бинарного) и GRUB
+# Ограничиваем аппетиты портажа, чтобы не вылетало
 emerge --ask=n sys-kernel/gentoo-kernel-bin
 emerge --ask=n sys-boot/grub
 
-# Установка GRUB на диск
-grub-install /dev/sda
+# Настройка GRUB
+grub-install $DISK
 grub-mkconfig -o /boot/grub/grub.cfg
 
-# Пароль рута (сделаем 'gentoo' по умолчанию, потом сменишь!)
+# Настройка сети (DHCP по умолчанию для Ethernet)
+emerge --ask=n net-misc/dhcpcd
+rc-update add dhcpcd default
+
+# Пароль
 echo "root:gentoo" | chpasswd
 
-echo "--- ГОТОВО! Можно перезагружаться ---"
+echo "УСТАНОВКА ЗАВЕРШЕНА!"
 EOF
 
-chmod +x /mnt/gentoo/final_step.sh
-chroot /mnt/gentoo /final_step.sh
+chmod +x /mnt/gentoo/install.sh
+chroot /mnt/gentoo /install.sh
