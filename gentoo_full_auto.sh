@@ -1,49 +1,56 @@
 #!/bin/bash
 set -e
 
-DISK="/dev/sda"
-# Simple Stage3 (not desktop, just base)
-STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-openrc/stage3-amd64-openrc-20260215T164556Z.tar.xz"
-
-echo ">>> 1. Nuking the disk..."
-swapoff -a || true
-# IMPORTANT: 'a 2' makes the partition bootable for your 14yo BIOS
-printf "o\nn\np\n1\n\n+4G\nt\n82\nn\np\n2\n\n\na\n2\nw\n" | fdisk $DISK
-
-echo ">>> 2. Formatting..."
-mkswap ${DISK}1 && swapon ${DISK}1
-mkfs.ext4 -F ${DISK}2
-mount ${DISK}2 /mnt/gentoo
-
-echo ">>> 3. Downloading BASE Stage3..."
+echo "--- 1. Preparation ---"
+# Диск ты уже разметил через cfdisk, так что просто шьем файловые системы
+mkswap /dev/sda1
+swapon /dev/sda1
+mkfs.ext4 -F /dev/sda2
+mount /dev/sda2 /mnt/gentoo
 cd /mnt/gentoo
-wget "$STAGE3_URL" -O s3.tar.xz
-tar xpvf s3.tar.xz --xattrs-include='*.*' --numeric-owner
 
-echo ">>> 4. Mounting..."
-cp -L /etc/resolv.conf /mnt/gentoo/etc/
-mount -t proc /proc /mnt/gentoo/proc
+echo "--- 2. Downloading Stage3 ---"
+wget https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-desktop-openrc/stage3-amd64-desktop-openrc-20260215T164556Z.tar.xz
+tar xpvf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner
+
+echo "--- 3. Mounting Environment ---"
+cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+mount --types proc /proc /mnt/gentoo/proc
 mount --rbind /sys /mnt/gentoo/sys
+mount --make-rslave /mnt/gentoo/sys
 mount --rbind /dev /mnt/gentoo/dev
+mount --make-rslave /mnt/gentoo/dev
+mount --bind /run /mnt/gentoo/run
+mount --make-slave /mnt/gentoo/run
 
-echo ">>> 5. Chrooting to finish this..."
-cat <<EOF > /mnt/gentoo/final.sh
+echo "--- 4. Internal Install ---"
+cat <<EOF > /mnt/gentoo/inside.sh
 #!/bin/bash
 source /etc/profile
-emerge-webrsync
 
-# Try to install GRUB. If it's already there, it just updates.
+# Sync and repair profile
+emerge-webrsync
+# Пытаемся поставить профиль (на 2026 год это скорее всего 23.0)
+eselect profile set default/linux/amd64/23.0/desktop
+
+# ВОТ ТУТ МЫ СТАВИМ ГРОБ, ЧТОБЫ ОН НЕ БЫЛ NOT FOUND
+echo ">>> Installing GRUB and Kernel-bin..."
+# CONFIG_PROTECT заставляет систему не тупить на конфигах
 CONFIG_PROTECT="-*" emerge --ask=n sys-boot/grub sys-kernel/gentoo-kernel-bin net-misc/dhcpcd
 
-# THE CRITICAL PART
-grub-install --target=i386-pc $DISK
+# Настройка загрузчика
+echo ">>> Running grub-install..."
+grub-install --target=i386-pc /dev/sda
 grub-mkconfig -o /boot/grub/grub.cfg
 
-echo "${DISK}2 / ext4 noatime 0 1" > /etc/fstab
-echo "${DISK}1 none swap sw 0 0" >> /etc/fstab
+# Настройка сети и пароля
+echo "/dev/sda2 / ext4 noatime 0 1" > /etc/fstab
+echo "/dev/sda1 none swap sw 0 0" >> /etc/fstab
 rc-update add dhcpcd default
 echo "root:gentoo" | chpasswd
+
+echo "DONE! Type exit, umount -R /mnt/gentoo and reboot."
 EOF
 
-chmod +x /mnt/gentoo/final.sh
-chroot /mnt/gentoo /final.sh
+chmod +x /mnt/gentoo/inside.sh
+chroot /mnt/gentoo /inside.sh
